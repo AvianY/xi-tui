@@ -1,35 +1,38 @@
 use std::io::Write;
 use std::collections::HashMap;
 
-use termion::clear;
-use termion::cursor;
+use xrl::{Line, Update};
+use termion::clear::CurrentLine as ClearLine;
+use termion::cursor::Goto;
 
 use cache::LineCache;
-use cursor::Cursor;
-use errors::*;
-use style::Style;
-use update::Update;
+use xrl::Style;
 use window::Window;
+
+use errors::*;
 
 const TAB_LENGTH: u16 = 4;
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Default)]
+pub struct Cursor {
+    pub line: u64,
+    pub column: u64,
+}
+
+
+#[derive(Debug)]
 pub struct View {
-    last_rev: u64,
-    pub filepath: String,
     cache: LineCache,
     cursor: Cursor,
     window: Window,
-    styles: HashMap<u16, Style>,
+    styles: HashMap<u64, Style>,
 }
 
 impl View {
-    pub fn new(filepath: &str) -> View {
+    pub fn new() -> View {
         View {
-            last_rev: 0,
-            filepath: filepath.to_owned(),
             cache: LineCache::new(),
-            cursor: Cursor::new(),
+            cursor: Default::default(),
             window: Window::new(),
             styles: HashMap::new(),
         }
@@ -39,39 +42,28 @@ impl View {
         self.styles.insert(style.id, style);
     }
 
-    pub fn update_lines(&mut self, update: &Update) -> Result<()> {
+    pub fn update_cache(&mut self, update: Update) {
         self.cache.update(update)
     }
 
-    pub fn update_cursor(&mut self, cursor_pos: (u64, u64)) {
-        self.cursor.update(cursor_pos);
-        self.window.update(&self.cursor.clone());
-    }
-
-    pub fn get_window(&self) -> (u64, u64) {
-        (self.window.start(), self.window.end())
+    pub fn set_cursor(&mut self, line: u64, column: u64) {
+        self.cursor = Cursor {
+            line: line,
+            column: column,
+        };
+        self.window.update(&self.cursor);
     }
 
     pub fn render<W: Write>(&mut self, w: &mut W) -> Result<()> {
-        if self.cache.is_dirty() || self.window.is_dirty() {
-            write!(w, "{}{}", cursor::Goto(1, 1), clear::All)
-                .chain_err(|| ErrorKind::DisplayError)?;
-
-            self.render_lines(w)?;
-            self.cache.mark_clean();
-            self.window.mark_clean();
-        }
-
+        self.render_lines(w)?;
         self.render_cursor(w)?;
-
         Ok(())
     }
 
-    pub fn resize(&mut self, height: u16) -> bool {
+    pub fn resize(&mut self, height: u16) {
         let cursor_line = self.cursor.line;
-        let nb_lines = self.cache.lines().len() as u64;
+        let nb_lines = self.cache.lines.len() as u64;
         self.window.resize(height, cursor_line, nb_lines);
-        self.window.is_dirty()
     }
 
     fn render_lines<W: Write>(&self, w: &mut W) -> Result<()> {
@@ -79,17 +71,13 @@ impl View {
 
         // Get the lines that are within the displayed window
         let lines = self.cache
-            .lines()
+            .lines
             .iter()
             .skip(self.window.start() as usize)
             .take(self.window.size() as usize);
 
         // Draw the valid lines within this range
         for (lineno, line) in lines.enumerate() {
-            if !line.is_valid {
-                continue;
-            }
-
             // Get the line vertical offset so that we know where to draw it.
             let line_pos = self.window
                 .offset(self.window.start() + lineno as u64)
@@ -98,8 +86,39 @@ impl View {
                     ErrorKind::DisplayError
                 })?;
 
-            line.render(w, line_pos + 1)?;
+            self.render_line(w, line, line_pos + 1);
         }
+        Ok(())
+    }
+
+    fn render_line<W: Write>(&self, w: &mut W, line: &Line, offset: u16) -> Result<()> {
+        let mut text = line.text.clone();
+        trim_new_line(&mut text);
+        // self.add_styles(&line.styles, &mut text)?;
+        write!(w, "{}{}{}", Goto(1, offset), ClearLine, text)
+            .chain_err(|| ErrorKind::DisplayError)?;
+        Ok(())
+    }
+
+    fn add_styles(&self, styles: &Vec<u64>, text: &mut String) -> Result<()> {
+        //if self.styles.is_empty() {
+        //    return Ok(());
+        //}
+        // FIXME: this fails with multiple style.
+        // especially if the offset is negative in which case it even panics
+        // also we don't handle style ids
+        //let mut style_idx = 0;
+        //for style in self.style {
+        //    let start = style.offset as usize;
+        //    let end = start + style.length as usize;
+
+        //    if end >= text.len() {
+        //        text.push_str(&format!("{}", termion::style::Reset));
+        //    } else {
+        //        text.insert_str(end, &format!("{}", termion::style::Reset));
+        //    }
+        //    text.insert_str(start, &format!("{}", termion::style::Invert));
+        //}
         Ok(())
     }
 
@@ -115,9 +134,8 @@ impl View {
 
         // Get the line that has the cursor
         let line = self.cache
-            .lines()
+            .lines
             .get(self.cursor.line as usize)
-            .and_then(|line| if line.is_valid { Some(line) } else { None })
             .ok_or_else(|| {
                 error!("No valid line at cursor index {}", self.cursor.line);
                 ErrorKind::DisplayError
@@ -139,11 +157,9 @@ impl View {
             .fold(0, add_char_width);
 
         // Draw the cursor
-        let cursor_pos = cursor::Goto(column as u16 + 1, line_pos + 1);
+        let cursor_pos = Goto(column as u16 + 1, line_pos + 1);
         write!(w, "{}", cursor_pos).chain_err(|| ErrorKind::DisplayError)?;
         debug!("Cursor set at line {} column {}", line_pos, column);
-        w.flush().chain_err(|| ErrorKind::DisplayError)?;
-
         Ok(())
     }
 }
@@ -153,5 +169,11 @@ fn add_char_width(acc: u16, c: char) -> u16 {
         acc + TAB_LENGTH - (acc % TAB_LENGTH)
     } else {
         acc + 1
+    }
+}
+
+fn trim_new_line(text: &mut String) {
+    if let Some('\n') = text.chars().last() {
+        text.pop();
     }
 }

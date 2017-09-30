@@ -1,36 +1,21 @@
-use cursor::Cursor;
+use view::Cursor;
 
 #[derive(Clone, Debug)]
 pub struct Window {
     start: u64,
     size: u16,
-    dirty: bool,
 }
 
 impl Window {
     pub fn new() -> Self {
-        Window {
-            start: 0,
-            size: 0,
-            dirty: true,
-        }
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
-    pub fn mark_clean(&mut self) {
-        self.dirty = false;
+        Window { start: 0, size: 0 }
     }
 
     pub fn update(&mut self, cursor: &Cursor) {
         if cursor.line < self.start() {
             self.start = cursor.line;
-            self.dirty = true;
         } else if cursor.line >= self.end() {
             self.start = 1 + cursor.line - u64::from(self.size);
-            self.dirty = true;
         }
     }
 
@@ -74,7 +59,6 @@ impl Window {
 
         self.start = new_start;
         self.size = height;
-        self.dirty = true;
     }
 
     pub fn size(&self) -> u16 {
